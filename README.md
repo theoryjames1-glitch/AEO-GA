@@ -211,3 +211,143 @@ $$
 ---
 
 👉 Do you want me to also **draw a figure** (like Goldberg’s schemata diagram, but in AEO signal space showing stable vs. disrupted regions in \$\rho\$–\$V\$–\$\gamma\$ space) to include alongside this section?
+
+### PSEUDOCODE
+
+```python
+import numpy as np
+
+# ---------------------------
+# Problem: Sphere function
+# ---------------------------
+def sphere(x):
+    return np.sum(x**2)
+
+# ---------------------------
+# AEO Controller
+# ---------------------------
+class AEOController:
+    def __init__(self,
+                 lam_init=0.8, sig_init=0.3,
+                 lam_min=0.1, lam_max=1.0,
+                 sig_min=0.001, sig_max=1.0,
+                 eta_lam=0.05, eta_sig=0.05,
+                 dlam_max=0.05, dsig_max=0.05,
+                 kT=0.5, kP=0.2, kV=0.3):
+        self.lam = lam_init
+        self.sig = sig_init
+        self.lam_min, self.lam_max = lam_min, lam_max
+        self.sig_min, self.sig_max = sig_min, sig_max
+        self.eta_lam, self.eta_sig = eta_lam, eta_sig
+        self.dlam_max, self.dsig_max = dlam_max, dsig_max
+        self.kT, self.kP, self.kV = kT, kP, kV
+
+        self.prev_best = None
+        self.stall_counter_sig = 0
+        self.stall_counter_lam = 0
+
+    def update(self, best, mean, rho, T, V):
+        """Update λ and σ based on signals."""
+        # Reward advantage = improvement in best
+        if self.prev_best is None:
+            R_adv = 0.0
+        else:
+            R_adv = (self.prev_best - best)
+        self.prev_best = best
+
+        V_star = max(V, 1e-8)
+
+        # λ update
+        dlam = self.eta_lam * (
+            + self.kT * np.tanh(T)
+            + self.kP * rho
+            + 0.5 * R_adv
+            - 0.3 * self.kV * np.log1p(max(0.0, V / V_star))
+        )
+        dlam = np.clip(dlam, -self.dlam_max, self.dlam_max)
+        self.lam = float(np.clip(self.lam + dlam, self.lam_min, self.lam_max))
+
+        # σ update
+        stall = float(np.tanh(max(0.0, 0.2 - abs(T))))
+        dsig = self.eta_sig * (
+            + 1.0 * stall
+            - 0.5 * np.tanh(V / V_star)
+        )
+        dsig = np.clip(dsig, -self.dsig_max, self.dsig_max)
+        self.sig = float(np.clip(self.sig + dsig, self.sig_min, self.sig_max))
+
+        # Hard guards
+        if self.sig <= self.sig_min + 1e-8:
+            self.stall_counter_sig += 1
+        else:
+            self.stall_counter_sig = 0
+
+        if self.lam <= self.lam_min + 1e-8:
+            self.stall_counter_lam += 1
+        else:
+            self.stall_counter_lam = 0
+
+        if self.stall_counter_sig >= 20:
+            self.sig = min(0.2, self.sig_max)
+            self.stall_counter_sig = 0
+
+        if self.stall_counter_lam >= 20:
+            self.lam = min(0.3, self.lam_max)
+            self.stall_counter_lam = 0
+
+        return self.lam, self.sig
+
+# ---------------------------
+# Genetic Algorithm with AEO
+# ---------------------------
+def run_aeo_ga(n_dim=5, pop_size=50, generations=200, seed=42):
+    rng = np.random.default_rng(seed)
+
+    # init population
+    pop = rng.normal(0, 1, size=(pop_size, n_dim))
+    fitness = np.array([sphere(ind) for ind in pop])
+
+    controller = AEOController()
+
+    for gen in range(generations+1):
+        best = np.min(fitness)
+        mean = np.mean(fitness)
+        var = np.var(fitness)
+
+        # Signals (mock for now)
+        rho = np.tanh(np.corrcoef(fitness, np.arange(len(fitness)))[0,1]) if len(fitness) > 1 else 0
+        T = (np.mean(fitness) - mean) / (mean + 1e-8)
+        V = var
+
+        lam, sig = controller.update(best, mean, rho, T, V)
+
+        if gen % 10 == 0:
+            print(f"Gen {gen:3d} | best={best:.5f} mean={mean:.5f} "
+                  f"| λ={lam:.3f} σ={sig:.3f} ρ={rho:.2f} T={T:.2e} V={V:.1e}")
+
+        # --- selection (tournament style) ---
+        n_elite = max(2, int(lam * pop_size))
+        elite_idx = np.argsort(fitness)[:n_elite]
+        elite = pop[elite_idx]
+
+        # --- reproduction ---
+        new_pop = []
+        for _ in range(pop_size):
+            parents = elite[rng.choice(n_elite, size=2, replace=False)]
+            child = (parents[0] + parents[1]) / 2.0
+            child += rng.normal(0, sig, size=n_dim)
+            new_pop.append(child)
+        pop = np.array(new_pop)
+        fitness = np.array([sphere(ind) for ind in pop])
+
+    return best
+
+# ---------------------------
+# Run test
+# ---------------------------
+if __name__ == "__main__":
+    best = run_aeo_ga()
+    print("Final best fitness:", best)
+```
+
+" GENETIC ALGORITHM JUST A K-ARM BANDIT DOING CLASSICAL BIOLOGY EVOLUTION THEORY "
