@@ -350,4 +350,361 @@ if __name__ == "__main__":
     print("Final best fitness:", best)
 ```
 
+Excellent 🚀 — let’s rewrite **Goldberg’s Genetic Algorithm (GA)** across the three lenses:
+
+---
+
+# 1️⃣ GA as **k-armed Bandit**
+
+Goldberg’s original metaphor:
+
+* Each **gene/allele** = an “arm.”
+* Each **fitness contribution** = reward from pulling that arm.
+* Selection = play arms with higher estimated reward.
+* Crossover/mutation = exploration to try less-played arms.
+
+Formally:
+
+* Bandit problem with \$k\$ alleles.
+* Policy = probability distribution over arms (chromosome structure).
+* Reward = fitness.
+* GA ≈ allocation algorithm (bias distribution toward better arms).
+
+So GA = **bandit with structured exploration**.
+
+---
+
+# 2️⃣ GA as **Online Convex Optimization (OCO)**
+
+Reframe GA as gradient-free online optimization:
+
+* Population = distribution \$p\_t(x)\$ over candidate solutions.
+* Fitness landscape = loss/reward function \$f\_t(x)\$.
+* Selection pressure = online update of \$p\_t\$.
+* Mutation = entropy regularization to avoid collapse.
+
+Update rule ≈ multiplicative weights (like EXP3 for adversarial bandits):
+
+$$
+p_{t+1}(x) \propto p_t(x)\,\exp(\eta \, f_t(x)).
+$$
+
+This is equivalent to **mirror descent** in OCO with KL divergence.
+So GA = an **OCO algorithm on distributions**.
+
+---
+
+# 3️⃣ GA as **AEO Machine**
+
+Now embed GA inside Adaptive Evolutionary Optimization (AEO):
+
+* **Markovian coefficients:** mutation rate, selection pressure, population size evolve as state variables \$\lambda\_t, \sigma\_t\$.
+* **Signals:**
+
+  * Trend \$T\_t\$: improvement in fitness (reward slope).
+  * Variance \$V\_t\$: dispersion of fitness in population.
+  * Phase \$\rho\_t\$: correlation between offspring vs. parents (exploit vs. explore).
+  * Effective step \$\gamma\_t\$: mutation strength × gradient proxy.
+* **Resonance law:** keep \$(\rho,V,\gamma)\$ inside stability bands.
+* **Recurrence:** coefficients update online like PPO/SFT recurrence.
+
+Update example:
+
+```math
+\lambda_{t+1} = \lambda_t + \eta_\lambda (-u_\rho - b_V + g_\gamma)
+```
+
+where \$\lambda\$ controls exploitation intensity.
+Mutation rate \$\sigma\_t\$ similarly adapts with variance feedback.
+
+So: **AEO-GA** = GA where *selection/mutation rates are not fixed*, but adapt online via resonance-control laws.
+
+---
+
+# 📊 Side-by-Side
+
+| Lens       | Representation                                          | Update Rule                                   |
+| ---------- | ------------------------------------------------------- | --------------------------------------------- |
+| **Bandit** | Alleles = arms, rewards = fitness                       | Pull arms ∝ estimated reward                  |
+| **OCO**    | Population = distribution \$p\_t(x)\$                   | \$p\_{t+1} \propto p\_t \exp(\eta f\_t)\$     |
+| **AEO**    | Population + adaptive coefficients \$(\lambda,\sigma)\$ | Closed-loop update from \$(T,V,\rho,\gamma)\$ |
+
+---
+
+✅ So Goldberg’s GA can be seen as:
+
+* **Bandit:** exploration vs exploitation of alleles.
+* **OCO:** multiplicative weights on populations.
+* **AEO:** *adaptive resonant controller* for population dynamics.
+
+---
+
+Perfect ⚡ — let’s make a **clean prototype of AEO-GA** (Adaptive Evolutionary Optimization Genetic Algorithm).
+
+We’ll take a classical GA skeleton and replace the fixed knobs (selection pressure, mutation rate) with **Markovian coefficients** that evolve according to AEO signals (\$T, V, \rho, \gamma\$).
+
+---
+
+# 🔧 AEO-GA Prototype
+
+```python
+import numpy as np
+
+# --- Fitness benchmark (Goldberg style: minimize Sphere) ---
+def sphere(x):
+    return np.sum(x**2)
+
+# --- Population Initialization ---
+def init_population(pop_size, dim, bounds):
+    return np.random.uniform(bounds[0], bounds[1], size=(pop_size, dim))
+
+# --- Selection (tournament with adaptive λ) ---
+def select(pop, fitness, lam):
+    """lam ~ selection pressure (higher => greedier)"""
+    i, j = np.random.randint(len(pop)), np.random.randint(len(pop))
+    if np.random.rand() < lam:
+        return pop[i] if fitness[i] < fitness[j] else pop[j]
+    else:
+        return pop[i] if fitness[i] > fitness[j] else pop[j]
+
+# --- Crossover ---
+def crossover(p1, p2, pc=0.9):
+    if np.random.rand() < pc:
+        alpha = np.random.rand()
+        return alpha*p1 + (1-alpha)*p2
+    return np.copy(p1)
+
+# --- Mutation (adaptive σ) ---
+def mutate(child, sigma, bounds):
+    child = child + np.random.normal(0, sigma, size=child.shape)
+    return np.clip(child, bounds[0], bounds[1])
+
+# --- AEO Signals ---
+class AEOTracker:
+    def __init__(self, beta=0.9):
+        self.prev_best = None
+        self.var = None
+        self.mean = None
+        self.beta = beta
+
+    def update(self, fitness):
+        best = np.min(fitness)
+        mean = np.mean(fitness)
+        var = np.var(fitness)
+
+        # Trend T: improvement in best fitness
+        if self.prev_best is None:
+            T = 0.0
+        else:
+            T = self.prev_best - best
+        self.prev_best = best
+
+        # Variance V
+        if self.var is None:
+            self.var, self.mean = var, mean
+        else:
+            self.var = self.beta*self.var + (1-self.beta)*var
+            self.mean = self.beta*self.mean + (1-self.beta)*mean
+
+        return best, mean, T, self.var
+
+# --- AEO Controller for λ, σ ---
+class AEOController:
+    def __init__(self, lam=0.8, sigma=0.3, eta=0.05):
+        self.lam = lam
+        self.sigma = sigma
+        self.eta = eta
+
+    def update(self, T, V, rho=0.0, gamma=0.0):
+        # Trend: if improving, increase selection pressure; else loosen
+        self.lam += self.eta * np.tanh(T)
+        self.lam = np.clip(self.lam, 0.1, 0.95)
+
+        # Variance: if pop converged (low V), increase mutation
+        self.sigma += self.eta * (0.1 - np.tanh(V))
+        self.sigma = np.clip(self.sigma, 1e-3, 1.0)
+
+        return self.lam, self.sigma
+
+# --- AEO-GA Main Loop ---
+def aeoga(fitness_fn, dim=5, bounds=(-5,5), pop_size=50, gens=200):
+    pop = init_population(pop_size, dim, bounds)
+    fitness = np.array([fitness_fn(ind) for ind in pop])
+
+    tracker = AEOTracker()
+    controller = AEOController()
+
+    for g in range(gens+1):
+        best, mean, T, V = tracker.update(fitness)
+        lam, sigma = controller.update(T, V)
+
+        new_pop = []
+        for _ in range(pop_size):
+            p1 = select(pop, fitness, lam)
+            p2 = select(pop, fitness, lam)
+            child = crossover(p1, p2)
+            child = mutate(child, sigma, bounds)
+            new_pop.append(child)
+        pop = np.array(new_pop)
+        fitness = np.array([fitness_fn(ind) for ind in pop])
+
+        if g % 10 == 0:
+            print(f"Gen {g:3d} | best={best:.5f} mean={mean:.5f} | λ={lam:.3f} σ={sigma:.3f} T={T:.2e} V={V:.1e}")
+
+    return best, pop[np.argmin(fitness)]
+```
+
+---
+
+# ✅ Run Test on Sphere Function
+
+```python
+best_val, best_sol = aeoga(sphere, dim=10, bounds=(-5,5), pop_size=60, gens=200)
+print("Final best:", best_val, "Solution:", best_sol)
+```
+
+---
+
+# 🎯 What This Does
+
+* **λ (selection pressure)** adapts with *trend*:
+  *If fitness improves → higher λ (exploit). If stuck → lower λ (explore).*
+* **σ (mutation stddev)** adapts with *variance*:
+  *If population collapses (low V) → raise σ. If too noisy → shrink σ.*
+* Reports: `best`, `mean`, λ, σ, T (trend), V (variance).
+
+---
+
+Perfect ⚡ — let’s extend the **AEO-GA** prototype to handle **Goldberg-style GA benchmarks**. These are the canonical problems David Goldberg used to test GA theory (k-armed bandit view, schema survival, deception).
+
+---
+
+# 🎯 Classic Goldberg Test Functions
+
+```python
+import numpy as np
+
+# --- OneMax (maximize number of 1s) ---
+def onemax(bitstring):
+    return -np.sum(bitstring)  # negative for minimization
+
+# --- Deceptive Trap (k=5 block trap function) ---
+def deceptive_trap(bitstring, k=5):
+    total = 0
+    for i in range(0, len(bitstring), k):
+        block = bitstring[i:i+k]
+        u = np.sum(block)
+        if u == k:
+            total += k
+        else:
+            total += k - 1 - u
+    return -total
+
+# --- Royal Road (reward full schemata of size k) ---
+def royal_road(bitstring, k=8):
+    total = 0
+    for i in range(0, len(bitstring), k):
+        block = bitstring[i:i+k]
+        if np.all(block == 1):
+            total += k
+    return -total
+
+# --- Sphere (continuous) remains available ---
+def sphere(x):
+    return np.sum(x**2)
+```
+
+---
+
+# 🔧 Bitstring GA Helpers
+
+```python
+def init_population_bits(pop_size, length):
+    return np.random.randint(0, 2, size=(pop_size, length))
+
+def select_bits(pop, fitness, lam):
+    i, j = np.random.randint(len(pop)), np.random.randint(len(pop))
+    if np.random.rand() < lam:
+        return pop[i] if fitness[i] < fitness[j] else pop[j]
+    else:
+        return pop[i] if fitness[i] > fitness[j] else pop[j]
+
+def crossover_bits(p1, p2, pc=0.9):
+    if np.random.rand() < pc:
+        point = np.random.randint(1, len(p1))
+        return np.concatenate([p1[:point], p2[point:]])
+    return np.copy(p1)
+
+def mutate_bits(child, sigma, length):
+    # sigma controls flip prob
+    flip_prob = min(0.5, max(1e-3, sigma))
+    mask = np.random.rand(length) < flip_prob
+    child[mask] = 1 - child[mask]
+    return child
+```
+
+---
+
+# 🔧 AEO-GA (bitstring version)
+
+```python
+def aeoga_bits(fitness_fn, length=40, pop_size=50, gens=200):
+    pop = init_population_bits(pop_size, length)
+    fitness = np.array([fitness_fn(ind) for ind in pop])
+
+    tracker = AEOTracker()
+    controller = AEOController()
+
+    for g in range(gens+1):
+        best, mean, T, V = tracker.update(fitness)
+        lam, sigma = controller.update(T, V)
+
+        new_pop = []
+        for _ in range(pop_size):
+            p1 = select_bits(pop, fitness, lam)
+            p2 = select_bits(pop, fitness, lam)
+            child = crossover_bits(p1, p2)
+            child = mutate_bits(child, sigma, length)
+            new_pop.append(child)
+        pop = np.array(new_pop)
+        fitness = np.array([fitness_fn(ind) for ind in pop])
+
+        if g % 10 == 0:
+            print(f"Gen {g:3d} | best={-best:.5f} mean={-mean:.5f} | λ={lam:.3f} σ={sigma:.3f} T={T:.2e} V={V:.1e}")
+
+    return pop[np.argmin(fitness)], -np.min(fitness)
+```
+
+---
+
+# ✅ Run Benchmarks
+
+```python
+# OneMax (length=40)
+best_sol, best_val = aeoga_bits(onemax, length=40, pop_size=60, gens=200)
+print("OneMax best:", best_val)
+
+# Deceptive Trap
+best_sol, best_val = aeoga_bits(deceptive_trap, length=40, pop_size=60, gens=200)
+print("Deceptive Trap best:", best_val)
+
+# Royal Road
+best_sol, best_val = aeoga_bits(royal_road, length=40, pop_size=60, gens=200)
+print("Royal Road best:", best_val)
+```
+
+---
+
+# 🎯 What You Get
+
+* **OneMax**: Should converge to `40` ones (optimum).
+* **Deceptive Trap**: Tests GA’s ability to avoid deceptive local optima.
+* **Royal Road**: Tests schema assembly (reward only for complete building blocks).
+* **AEO Control**:
+  *λ* (selection pressure) adapts to **trend (T)**.
+  *σ* (mutation rate) adapts to **variance (V)**.
+
+---
+
+
 " GENETIC ALGORITHM JUST A K-ARM BANDIT DOING CLASSICAL BIOLOGY EVOLUTION THEORY "
